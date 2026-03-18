@@ -14,8 +14,9 @@ PASS_UR="CAOcao123CAO@"
 # ==== TỐI ƯU MẠNG VÀ Ổ CỨNG ====
 DNS_OPTS="--dns 1.1.1.1 --dns 1.0.0.1"
 
-# ĐÃ MỞ LOG: Giới hạn mỗi container 10MB x 3 file để chống đầy ổ cứng
-LOG_OPTS="--log-opt max-size=10m --log-opt max-file=3"
+# ĐÃ MỞ LOG HOÀN TOÀN KHÔNG GIỚI HẠN 
+# (Cảnh báo: Log sẽ phình to liên tục theo thời gian)
+LOG_OPTS=""
 
 IFACE="eth0"
 
