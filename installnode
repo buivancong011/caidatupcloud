@@ -1,0 +1,145 @@
+#!/bin/bash
+set -e
+
+# ==========================================
+# 1. CẤU HÌNH TOKEN
+# ==========================================
+TOKEN_TM="/PfkwR8qQMfbsCMrSaaDhsX96E9w2PeHH2bcGeyFBno="
+TOKEN_EARNFM="50f04bbe-94d9-4f6a-82b9-b40016bd4bbb"
+TOKEN_REPOCKET_EMAIL="nguyenvinhson000@gmail.com"
+TOKEN_REPOCKET_API="cad6dcce-d038-4727-969b-d996ed80d3ef"
+USER_UR="nguyenvinhcao123@gmail.com"
+PASS_UR="CAOcao123CAO@"
+
+# ==== TỐI ƯU MẠNG VÀ Ổ CỨNG ====
+DNS_OPTS="--dns 1.1.1.1 --dns 1.0.0.1"
+
+# ĐÃ MỞ LOG: Giới hạn mỗi container 10MB x 3 file để chống đầy ổ cứng
+LOG_OPTS="--log-opt max-size=10m --log-opt max-file=3"
+
+IFACE="eth0"
+
+# Logger
+log() { echo -e "\e[32m[INFO] $1\e[0m"; }
+warn() { echo -e "\e[33m[WARN] $1\e[0m"; }
+err() { echo -e "\e[31m[ERROR] $1\e[0m"; exit 1; }
+
+# ==========================================
+# 2. CHUẨN BỊ DEBIAN
+# ==========================================
+log "Đang cập nhật hệ thống & cài đặt tools..."
+sudo apt-get update -q
+sudo apt-get install -y curl net-tools grep iptables iproute2 jq
+
+if ! command -v docker &> /dev/null; then
+    log "Đang cài đặt Docker..."
+    curl -fsSL https://get.docker.com | sh
+    sudo systemctl enable --now docker
+fi
+
+# ==========================================
+# 3. QUÉT IP TỰ ĐỘNG BẰNG MẢNG (ARRAY)
+# ==========================================
+log "Đang quét danh sách IP trên interface $IFACE..."
+
+# Lấy tất cả IPv4 trên eth0 (bao gồm cả alias) và đưa vào mảng
+mapfile -t ALL_IPS < <(ip -o -4 addr show dev $IFACE | awk '{print $4}' | cut -d/ -f1)
+TOTAL_IPS=${#ALL_IPS[@]}
+
+if [ "$TOTAL_IPS" -eq 0 ]; then
+    err "Không tìm thấy IP nào trên $IFACE!"
+fi
+
+log "Đã tìm thấy $TOTAL_IPS IP:"
+for i in "${!ALL_IPS[@]}"; do
+    echo "  - Node $((i+1)): ${ALL_IPS[$i]}"
+done
+
+# ==========================================
+# 4. NETWORK & SNAT (ĐỊNH TUYẾN OUTBOUND)
+# ==========================================
+log "Đang dọn dẹp các container và network cũ..."
+if [ -n "$(docker ps -aq)" ]; then docker rm -f $(docker ps -aq) >/dev/null 2>&1; fi
+docker network prune -f >/dev/null 2>&1
+
+log "Thiết lập rules SNAT (Iptables)..."
+sudo iptables -t nat -F POSTROUTING # Xóa rule cũ để tránh trùng lặp
+
+# Tạo vòng lặp để setup riêng một mạng subnet cho từng IP
+for i in "${!ALL_IPS[@]}"; do
+    INDEX=$((i+1))
+    IP="${ALL_IPS[$i]}"
+    SUBNET="192.168.10${INDEX}.0/24" # Tạo dải mạng tự động: 192.168.101.x, 102.x...
+    NET_NAME="node_net_${INDEX}"
+
+    docker network create "$NET_NAME" --driver bridge --subnet "$SUBNET" >/dev/null 2>&1 || true
+    
+    # Ép traffic từ subnet này đi ra đúng cái IP tương ứng
+    sudo iptables -t nat -I POSTROUTING -s "$SUBNET" -j SNAT --to-source "$IP"
+done
+
+sleep 2
+
+# ==========================================
+# 5. TEST KẾT NỐI (CHECK IP PUBLIC THỰC TẾ)
+# ==========================================
+log "🕵️ Kiểm tra định tuyến IP (Outbound)..."
+for i in "${!ALL_IPS[@]}"; do
+    INDEX=$((i+1))
+    NET_NAME="node_net_${INDEX}"
+    EXPECTED_IP="${ALL_IPS[$i]}"
+    
+    ACTUAL_IP=$(docker run --rm --network "$NET_NAME" $DNS_OPTS curlimages/curl:latest -s --max-time 10 https://api.ipify.org || echo "LỖI MẠNG")
+    
+    if [ "$ACTUAL_IP" == "$EXPECTED_IP" ]; then
+        log "👉 Node $INDEX: CHUẨN ($ACTUAL_IP)"
+    else
+        warn "⚠️ Node $INDEX: LỆCH IP! (Mong đợi: $EXPECTED_IP - Thực tế xuất ra: $ACTUAL_IP)"
+    fi
+done
+
+# ==========================================
+# 6. KHỞI CHẠY NODES (VÒNG LẶP TỰ ĐỘNG)
+# ==========================================
+log "🚀 Đang kích hoạt các Node chia sẻ băng thông..."
+
+run_nodes() {
+    local INDEX=$1
+    local NET=$2
+    local BIND_IP=$3
+    
+    log "  -> Khởi tạo cụm Docker cho Node $INDEX (IP: $BIND_IP)..."
+
+    # Traffmonetizer
+    docker run -d --network $NET --restart always --name tm_$INDEX $DNS_OPTS $LOG_OPTS \
+      traffmonetizer/cli_v2:latest start accept --token "$TOKEN_TM" >/dev/null
+
+    # Mysterium (Map chính xác vào BIND_IP để không bị đụng Port 4449 trên Host)
+    docker run -d --network $NET --cap-add NET_ADMIN $DNS_OPTS $LOG_OPTS \
+      -p ${BIND_IP}:4449:4449 \
+      --name myst_$INDEX -v myst-data${INDEX}:/var/lib/mysterium-node \
+      --restart unless-stopped mysteriumnetwork/myst:latest service --agreed-terms-and-conditions >/dev/null
+
+    # UrNetwork
+    docker run -d --network $NET --restart always --cap-add NET_ADMIN $DNS_OPTS $LOG_OPTS \
+      --name ur_$INDEX -v ur_data_${INDEX}:/var/lib/vnstat \
+      -e USER_AUTH="$USER_UR" -e PASSWORD="$PASS_UR" techroy23/docker-urnetwork:latest >/dev/null
+
+    # EarnFM
+    docker run -d --network $NET --restart always $DNS_OPTS $LOG_OPTS \
+      -e EARNFM_TOKEN="$TOKEN_EARNFM" --name earn_$INDEX earnfm/earnfm-client:latest >/dev/null
+
+    # Repocket
+    docker run -d --network $NET --restart always $DNS_OPTS $LOG_OPTS \
+      --name rp_$INDEX \
+      -e RP_EMAIL="$TOKEN_REPOCKET_EMAIL" -e RP_API_KEY="$TOKEN_REPOCKET_API" repocket/repocket:latest >/dev/null
+}
+
+# Lặp qua tất cả IP để chạy các Node
+for i in "${!ALL_IPS[@]}"; do
+    INDEX=$((i+1))
+    run_nodes "$INDEX" "node_net_${INDEX}" "${ALL_IPS[$i]}"
+done
+
+log "==== HOÀN TẤT CẤU HÌNH ===="
+docker ps --format "table {{.Names}}\t{{.Status}}"
