@@ -1,0 +1,25 @@
+#!/bin/bash
+set -euo pipefail
+
+echo "========================================"
+echo "[INFO] Bắt đầu cấu hình 5 node Mysterium..."
+echo "========================================"
+
+# Vòng lặp chạy từ 1 đến 5
+for i in {1..5}; do
+    CONTAINER="myst_$i"
+    echo "[INFO] Đang cấu hình $CONTAINER ..."
+    
+    # Lệnh set config cho Mysterium
+    docker exec "$CONTAINER" myst config set payments.zero-stake-unsettled-amount 1 || true
+    
+    # Nghỉ 1 giây để tránh nghẽn tiến trình của Docker
+    sleep 1
+done
+
+echo "----------------------------------------"
+echo "[INFO] Đang Restart toàn bộ 5 node để áp dụng cấu hình..."
+docker restart myst_1 myst_2 myst_3 myst_4 myst_5 || true
+
+echo "----------------------------------------"
+echo "[DONE] Setup 5 node Mysterium hoàn tất ✅"
