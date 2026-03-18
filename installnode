@@ -11,13 +11,8 @@ TOKEN_REPOCKET_API="cad6dcce-d038-4727-969b-d996ed80d3ef"
 USER_UR="nguyenvinhcao123@gmail.com"
 PASS_UR="CAOcao123CAO@"
 
-# ==== TỐI ƯU MẠNG VÀ Ổ CỨNG ====
+# ==== TỐI ƯU MẠNG ====
 DNS_OPTS="--dns 1.1.1.1 --dns 1.0.0.1"
-
-# ĐÃ MỞ LOG HOÀN TOÀN KHÔNG GIỚI HẠN 
-# (Cảnh báo: Log sẽ phình to liên tục theo thời gian)
-LOG_OPTS=""
-
 IFACE="eth0"
 
 # Logger
@@ -112,26 +107,31 @@ run_nodes() {
     log "  -> Khởi tạo cụm Docker cho Node $INDEX (IP: $BIND_IP)..."
 
     # Traffmonetizer
-    docker run -d --network $NET --restart always --name tm_$INDEX $DNS_OPTS $LOG_OPTS \
+    docker run -d --network $NET --restart always --name tm_$INDEX $DNS_OPTS \
       traffmonetizer/cli_v2:latest start accept --token "$TOKEN_TM" >/dev/null
 
-    # Mysterium (Map chính xác vào BIND_IP để không bị đụng Port 4449 trên Host)
-    docker run -d --network $NET --cap-add NET_ADMIN $DNS_OPTS $LOG_OPTS \
-      -p ${BIND_IP}:4449:4449 \
+    # Mysterium (Cấu hình UDP tĩnh theo Index để thu hút traffic cực đại)
+    local UDP_START=$(( 10000 + (INDEX - 1) * 20 ))
+    local UDP_END=$(( UDP_START + 10 ))
+
+    docker run -d --network $NET --cap-add NET_ADMIN $DNS_OPTS \
+      -p ${BIND_IP}:4449:4449/tcp \
+      -p ${BIND_IP}:${UDP_START}-${UDP_END}:${UDP_START}-${UDP_END}/udp \
       --name myst_$INDEX -v myst-data${INDEX}:/var/lib/mysterium-node \
-      --restart unless-stopped mysteriumnetwork/myst:latest service --agreed-terms-and-conditions >/dev/null
+      --restart unless-stopped mysteriumnetwork/myst:latest service --agreed-terms-and-conditions \
+      --udp.ports=${UDP_START}:${UDP_END} >/dev/null
 
     # UrNetwork
-    docker run -d --network $NET --restart always --cap-add NET_ADMIN $DNS_OPTS $LOG_OPTS \
+    docker run -d --network $NET --restart always --cap-add NET_ADMIN $DNS_OPTS \
       --name ur_$INDEX -v ur_data_${INDEX}:/var/lib/vnstat \
       -e USER_AUTH="$USER_UR" -e PASSWORD="$PASS_UR" techroy23/docker-urnetwork:latest >/dev/null
 
     # EarnFM
-    docker run -d --network $NET --restart always $DNS_OPTS $LOG_OPTS \
+    docker run -d --network $NET --restart always $DNS_OPTS \
       -e EARNFM_TOKEN="$TOKEN_EARNFM" --name earn_$INDEX earnfm/earnfm-client:latest >/dev/null
 
     # Repocket
-    docker run -d --network $NET --restart always $DNS_OPTS $LOG_OPTS \
+    docker run -d --network $NET --restart always $DNS_OPTS \
       --name rp_$INDEX \
       -e RP_EMAIL="$TOKEN_REPOCKET_EMAIL" -e RP_API_KEY="$TOKEN_REPOCKET_API" repocket/repocket:latest >/dev/null
 }
