@@ -2,12 +2,13 @@
 set -euo pipefail
 
 echo "========================================"
-echo "[INFO] Bắt đầu cấu hình 5 node Mysterium..."
+echo "[INFO] Bắt đầu cấu hình 5 node Mysterium (node_1 đến node_5)..."
 echo "========================================"
 
 # Vòng lặp chạy từ 1 đến 5
 for i in {1..5}; do
-    CONTAINER="myst_$i"
+    # Cập nhật tên container có thêm chữ "_node_"
+    CONTAINER="myst_node_$i"
     echo "[INFO] Đang cấu hình $CONTAINER ..."
     
     # Lệnh set config cho Mysterium
@@ -18,8 +19,9 @@ for i in {1..5}; do
 done
 
 echo "----------------------------------------"
-echo "[INFO] Đang Restart toàn bộ 5 node để áp dụng cấu hình..."
-docker restart myst_1 myst_2 myst_3 myst_4 myst_5 || true
+echo "[INFO] Đang Restart 5 node để áp dụng cấu hình..."
+# Cập nhật danh sách restart đúng tên mới
+docker restart myst_node_1 myst_node_2 myst_node_3 myst_node_4 myst_node_5 || true
 
 echo "----------------------------------------"
 echo "[DONE] Setup 5 node Mysterium hoàn tất ✅"
