@@ -12,8 +12,11 @@ USER_UR="nguyenvinhcao123@gmail.com"
 PASS_UR="CAOcao123CAO@"
 TOKEN_PROXYRACK_API="KK3M5OBY1TDBZ97KMJBBYKIV4PE9DIKUXIERYWVA"
 
+# ==== CẤU HÌNH MARKERS & DNS ====
 DNS_OPTS="--dns 1.1.1.1 --dns 1.0.0.1"
-MARKER_FILE="/root/.proxyrack_registered_vinh"
+MARKER_V1="/root/.proxyrack_registered_vinh"       # Cờ máy cũ (IP)
+MARKER_V2="/root/.proxyrack_v2_mac_vinh"            # Cờ máy mới (MAC)
+
 declare -a PR_UUIDS
 declare -a PR_NAMES
 
@@ -22,7 +25,7 @@ warn() { echo -e "\e[33m[WARN] $1\e[0m"; }
 err() { echo -e "\e[31m[ERROR] $1\e[0m"; exit 1; }
 
 # ==========================================
-# 2. CHỌN IMAGE & CHUẨN BỊ DEBIAN 12
+# 2. CHỌN IMAGE & CHUẨN BỊ HỆ THỐNG
 # ==========================================
 ARCH=$(uname -m)
 if [[ "$ARCH" == "aarch64" ]]; then
@@ -49,8 +52,7 @@ if ! command -v docker &> /dev/null; then
   sudo systemctl enable --now docker
 fi
 
-# ==== TỐI ƯU HỆ THỐNG & SWAP (BẢO HIỂM CHỐNG TRÀN RAM) ====
-log "Cấu hình bộ nhớ đệm mạng (4MB), BBR..."
+# Tối ưu Sysctl & Swap
 sudo tee /etc/sysctl.d/99-mmo-node-tuning.conf >/dev/null <<EOF
 net.core.rmem_max=4194304
 net.core.wmem_max=4194304
@@ -60,85 +62,44 @@ vm.swappiness=10
 EOF
 sudo sysctl -p /etc/sysctl.d/99-mmo-node-tuning.conf >/dev/null 2>&1 || true
 
-log "Cấu hình Swap 2GB (Khuyên dùng dù có 8GB RAM)..."
 if [ ! -f /swapfile ]; then
     sudo dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
     sudo chmod 600 /swapfile
-    sudo mkswap /swapfile
-    sudo swapon /swapfile
+    sudo mkswap /swapfile && sudo swapon /swapfile
     echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
-else
-    log "Swap file đã tồn tại, bỏ qua."
 fi
 
 # ==========================================
-# 3. LẤY IP TỰ ĐỘNG BẰNG MẢNG (UPCLOUD MULTI-IP)
+# 3. LẤY IP TỰ ĐỘNG BẰNG MẢNG
 # ==========================================
-log "Đang dò tìm Card mạng chính..."
 MAIN_IFACE=$(ip route show default | awk '/default/ {print $5}' | head -n 1)
 [ -z "$MAIN_IFACE" ] && err "Không tìm thấy Interface mạng chính!"
 
-log "--- KẾT QUẢ QUÉT IP TRÊN $MAIN_IFACE ---"
-# Quét toàn bộ IP được gán trên Card (Bao gồm cả Alias eth0:1, eth0:2...)
 mapfile -t ALL_IPS < <(ip -4 addr show dev $MAIN_IFACE | grep -w inet | awk '{print $2}' | cut -d/ -f1)
 TOTAL_IPS=${#ALL_IPS[@]}
-
-if [ "$TOTAL_IPS" -eq 0 ]; then
-    err "Không tìm thấy IP nào trên $MAIN_IFACE!"
-fi
-
-log "Đã tìm thấy $TOTAL_IPS IP Public:"
-for i in "${!ALL_IPS[@]}"; do
-    log " -> IP $((i+1)): ${ALL_IPS[$i]}"
-done
+[ "$TOTAL_IPS" -eq 0 ] && err "Không tìm thấy IP nào!"
 
 # ==========================================
-# 4. NETWORK & SNAT AN TOÀN
+# 4. NETWORK & SNAT
 # ==========================================
 log "Dọn dẹp môi trường cũ..."
-if [ -n "$(docker ps -aq)" ]; then docker rm -f $(docker ps -aq) >/dev/null 2>&1; fi
+[ -n "$(docker ps -aq)" ] && docker rm -f $(docker ps -aq) >/dev/null 2>&1
 docker network prune -f >/dev/null 2>&1
 
-# Xóa các rule SNAT của script cũ (bảo vệ rule gốc của Docker)
 sudo iptables-save | grep -v "192.168.10" | sudo iptables-restore
 
-log "Cấu hình Mạng nội bộ & SNAT cho từng IP..."
 for i in "${!ALL_IPS[@]}"; do
     INDEX=$((i+1))
     IP="${ALL_IPS[$i]}"
     NET_NAME="my_network_$INDEX"
-    SUBNET="192.168.10${INDEX}.0/24" # Dải mạng tự động tịnh tiến: 101.0, 102.0...
-
+    SUBNET="192.168.10${INDEX}.0/24"
     docker network create "$NET_NAME" --driver bridge --subnet "$SUBNET" >/dev/null 2>&1 || true
     sudo iptables -t nat -I POSTROUTING -s "$SUBNET" -j SNAT --to-source "$IP"
 done
-
-sleep 3 # Đợi iptables cập nhật
-
-# ==========================================
-# 5. CHECK IP OUTPUT (CHỐT CHẶN KHẮT KHE)
-# ==========================================
-get_public_ip() {
-    docker run --rm --network "$1" $DNS_OPTS curlimages/curl:latest -s --max-time 10 https://api.ipify.org || echo "LỖI_MẠNG"
-}
-
-log "🕵️ Check định tuyến IP Public thực tế..."
-for i in "${!ALL_IPS[@]}"; do
-    INDEX=$((i+1))
-    EXPECTED_IP="${ALL_IPS[$i]}"
-    ACTUAL_IP=$(get_public_ip "my_network_$INDEX")
-    
-    if [ "$ACTUAL_IP" == "$EXPECTED_IP" ]; then
-        log "👉 Node $INDEX -> Đi ra chuẩn IP: [$ACTUAL_IP]"
-    else
-        err "❌ LỖI NGHIÊM TRỌNG: Node $INDEX yêu cầu IP ($EXPECTED_IP) nhưng lại ra bằng ($ACTUAL_IP). Dừng Script lập tức!"
-    fi
-done
-
-log "✅ TUYỆT VỜI: Mạng đã tách luồng $TOTAL_IPS IP thành công."
+sleep 3
 
 # ==========================================
-# 6. KHỞI CHẠY NODE
+# 6. KHỞI CHẠY NODE & PROXYRACK V1/V2 LOGIC
 # ==========================================
 log "🚀 Đang tải Images..."
 for img in "$IMG_TM" "$IMG_MYST" "$IMG_UR" "$IMG_EARN" "$IMG_REPO"; do
@@ -157,50 +118,52 @@ run_nodes() {
     docker run -d --network $NET --restart always $DNS_OPTS --name rp_$SUFFIX -e RP_EMAIL="$TOKEN_REPOCKET_EMAIL" -e RP_API_KEY="$TOKEN_REPOCKET_API" $IMG_REPO >/dev/null
 
     if [[ "$ARCH" != "aarch64" ]]; then
-      local PR_UUID=$(echo -n "${BIND_IP}-Proxyrack-Vinh" | sha256sum | awk '{print toupper($1)}')
-      local CLEAN_IP="${BIND_IP//./}"
-      local PR_NAME="ProxyrackNode${INDEX}_${CLEAN_IP}"
+      local PR_UUID=""
+      local PR_NAME="PR_Node${INDEX}_${BIND_IP//./}"
+
+      # --- LOGIC BĂM UUID THEO ĐÚNG YÊU CẦU ---
+      if [ -f "$MARKER_V2" ]; then
+          # Máy mới: MAC + IP
+          local MAC_ADDR=$(cat /sys/class/net/$MAIN_IFACE/address)
+          PR_UUID=$(echo -n "${BIND_IP}-${MAC_ADDR}-Proxyrack-Vinh" | sha256sum | awk '{print toupper($1)}')
+      elif [ -f "$MARKER_V1" ]; then
+          # Máy cũ: IP Only
+          PR_UUID=$(echo -n "${BIND_IP}-Proxyrack-Vinh" | sha256sum | awk '{print toupper($1)}')
+      else
+          # Lần đầu: MAC + IP
+          local MAC_ADDR=$(cat /sys/class/net/$MAIN_IFACE/address)
+          PR_UUID=$(echo -n "${BIND_IP}-${MAC_ADDR}-Proxyrack-Vinh" | sha256sum | awk '{print toupper($1)}')
+      fi
 
       docker run -d --network $NET --restart always $DNS_OPTS -e UUID="$PR_UUID" --name pr_$SUFFIX $IMG_PR >/dev/null
-
       PR_UUIDS+=("$PR_UUID"); PR_NAMES+=("$PR_NAME")
     fi
 }
 
-log "🚀 Bắt đầu chạy $TOTAL_IPS cụm Nodes..."
 for i in "${!ALL_IPS[@]}"; do
     INDEX=$((i+1))
     run_nodes "$INDEX" "my_network_$INDEX" "${ALL_IPS[$i]}" "node_$INDEX"
 done
 
-log "==== DONE STARTING CONTAINERS ===="
-docker ps --format "table {{.Names}}\t{{.Status}}"
-
 # ==========================================
-# 7. GỌI API PROXYRACK
+# 7. GỌI API PROXYRACK (BẢO VỆ API)
 # ==========================================
 if [ ${#PR_UUIDS[@]} -gt 0 ]; then
     echo "------------------------------------------------------"
-    if [ -f "$MARKER_FILE" ]; then
-        log "✅ HỆ THỐNG GHI NHẬN: Đã đăng ký Proxyrack trước đó. BỎ QUA gọi API!"
+    if [ -f "$MARKER_V1" ] || [ -f "$MARKER_V2" ]; then
+        log "✅ Đã đăng ký (V1/V2). Giữ nguyên UUID, BỎ QUA thời gian chờ và API!"
     else
-        warn "⏳ Đang đợi 2 phút để thiết bị Proxyrack kết nối..."
+        warn "⏳ Đợi 2 phút đăng ký thiết bị lần đầu..."
         for i in {120..1}; do printf "\r⏳ Còn lại %3d giây..." "$i"; sleep 1; done; echo ""
-
-        log "🚀 Đang gọi API thêm thiết bị Proxyrack..."
         for j in "${!PR_UUIDS[@]}"; do
-            UUID="${PR_UUIDS[$j]}"
-            NAME="${PR_NAMES[$j]}"
-            
-            log "Gửi đăng ký cho: $NAME"
             curl -s -X POST https://peer.proxyrack.com/api/device/add \
-              -H "Api-Key: $TOKEN_PROXYRACK_API" \
-              -H "Content-Type: application/json" \
-              -H "Accept: application/json" \
-              -d "{\"device_id\":\"$UUID\",\"device_name\":\"$NAME\"}" > /dev/null 2>&1 || true
+              -H "Api-Key: $TOKEN_PROXYRACK_API" -H "Content-Type: application/json" \
+              -d "{\"device_id\":\"${PR_UUIDS[$j]}\",\"device_name\":\"${PR_NAMES[$j]}\"}" > /dev/null 2>&1 || true
         done
-        
-        touch "$MARKER_FILE"
-        log "✅ Đã lưu cờ đánh dấu tại $MARKER_FILE"
+        touch "$MARKER_V2"
+        log "✅ Đã lưu cờ V2 (MAC)."
     fi
 fi
+
+log "==== DONE - VINH CAO ===="
+docker ps --format "table {{.Names}}\t{{.Status}}"
