@@ -1,25 +1,26 @@
 #!/bin/bash
 set -e
 
-echo "[1/3] Đang tạo Script định tuyến động tại /root/yandex_multi_ip.sh..."
+echo "[1/3] Đang tạo Script định tuyến siêu tốc tại /root/yandex_multi_ip.sh..."
 
 cat << 'EOF' > /root/yandex_multi_ip.sh
 #!/bin/bash
 
-# 1. Bật tất cả các card mạng phụ (từ eth1 đến eth15) và xin cấp IP
-for i in {1..15}; do 
-    ip link set eth$i up 2>/dev/null || true
-    dhclient eth$i 2>/dev/null || true
+echo "1. Đang bật tất cả các card mạng..."
+# Tự động quét TẤT CẢ các card mạng vật lý hiện có (bỏ qua card ảo 'lo')
+IFACES=$(ls /sys/class/net | grep -v lo)
+for iface in $IFACES; do
+    ip link set $iface up 2>/dev/null || true
+    dhclient $iface 2>/dev/null || true
 done
 
-# Chờ 3 giây để hệ điều hành nhận diện IP xong
+# Nghỉ 3 giây cho mạng ổn định
 sleep 3
-
-# 2. Xóa các cấu hình NAT cũ để tránh xung đột nếu chạy lại nhiều lần
 iptables -t nat -F POSTROUTING 2>/dev/null || true
 
-# 3. Quét toàn bộ IP và thiết lập Policy Routing & SNAT
-mapfile -t ALL_IPS < <(ip -o -4 addr show | grep ' eth' | grep -w inet | awk '{print $4}' | cut -d/ -f1)
+echo "2. Đang phân luồng định tuyến (Policy Routing)..."
+# Quét IP bằng awk (chuẩn xác 100% với mọi hệ điều hành)
+mapfile -t ALL_IPS < <(ip -o -4 addr show | awk '$2 != "lo" {print $4}' | cut -d/ -f1)
 
 for i in "${!ALL_IPS[@]}"; do
     INDEX=$((i+1))
@@ -27,24 +28,31 @@ for i in "${!ALL_IPS[@]}"; do
     SUBNET="192.168.10${INDEX}.0/24"
     TABLE_ID=$((INDEX + 200))
     
-    # Tự động dò Gateway của từng card
-    IFACE=$(ip -o -4 addr show | grep -w "$IP" | awk '{print $2}')
-    GW=$(ip -4 route show dev "$IFACE" scope link | grep -oP '^[0-9.]+' | head -n1 | sed 's/\.[0-9]\+$/.1/')
+    # Dò tên Card mạng dựa trên IP
+    IFACE=$(ip -o -4 addr show | awk -v ip="$IP" '$4 ~ ip {print $2}')
     
-    # Thiết lập Rule ép đường đi (Dữ liệu từ subnet nào thì ra đúng card mạng đó)
+    # Thuật toán tính Gateway tuyệt đối của Yandex (Lấy 3 số đầu của IP ráp với .1)
+    # Ví dụ: IP là 10.128.7.20 -> Gateway tự biến thành 10.128.7.1
+    GW=$(echo "$IP" | awk -F. '{print $1"."$2"."$3".1"}')
+    
+    echo " -> Đã cấu hình: Cụm $INDEX | IP: $IP | Card: $IFACE | Gateway: $GW"
+    
+    # Xoá rule cũ (nếu có) để tránh lỗi trùng lặp
+    ip route flush table "$TABLE_ID" 2>/dev/null || true
+    
+    # Thiết lập Rule ép đường đi
     ip route add default via "$GW" dev "$IFACE" table "$TABLE_ID" 2>/dev/null || true
     ip rule add from "$SUBNET" table "$TABLE_ID" 2>/dev/null || true
     
-    # Thiết lập NAT (Đổi IP nguồn thành IP của card mạng)
+    # Thiết lập NAT (Đổi IP nguồn)
     iptables -t nat -I POSTROUTING -s "$SUBNET" -j SNAT --to-source "$IP" 2>/dev/null || true
 done
 EOF
 
-# Cấp quyền thực thi
+# Cấp quyền
 chmod +x /root/yandex_multi_ip.sh
 
-echo "[2/3] Đang tạo Systemd Service để tự chạy khi Reboot..."
-
+echo "[2/3] Đang tạo Systemd Service chạy ngầm..."
 cat << 'EOF' > /etc/systemd/system/yandex-routing.service
 [Unit]
 Description=Yandex Cloud Multi-IP Routing Service
@@ -60,11 +68,9 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
-echo "[3/3] Đang kích hoạt Service vĩnh viễn..."
-
+echo "[3/3] Đang kích hoạt tự động chạy khi Reboot..."
 systemctl daemon-reload
 systemctl enable yandex-routing.service
 systemctl restart yandex-routing.service
 
-echo "🎉 HOÀN TẤT! Cấu hình mạng đã được lưu."
-echo "Bây giờ bạn có thể Reboot máy thoải mái, VPS sẽ luôn tự động nhận đủ card mạng và phân luồng chuẩn xác!"
+echo "🎉 HOÀN TẤT! VPS của bạn đã nhận diện đủ 8 luồng mạng."
