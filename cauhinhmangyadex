@@ -1,0 +1,66 @@
+cat << 'EOF' > /root/multi_ip_auto.sh
+#!/bin/bash
+
+echo "1. Bật và xin cấp IP cho các card mạng (từ eth1 đến eth15)..."
+# Cố tình bỏ qua eth0 để tuyệt đối không làm sập mạng tổng
+for i in {1..15}; do
+    ip link set eth$i up 2>/dev/null || true
+    dhclient eth$i 2>/dev/null || true
+done
+
+echo "Đang đợi 5 giây để Yandex cấp IP..."
+sleep 5
+
+echo "2. Đang tự động gán Rule định tuyến y hệt bản thủ công..."
+TABLE_ID=101
+
+# Chạy vòng lặp đúng các card mạng phụ
+for i in {1..15}; do
+    IFACE="eth$i"
+    
+    # Đọc IP của card mạng
+    IP=$(ip -4 addr show dev $IFACE 2>/dev/null | grep -w inet | awk '{print $2}' | cut -d/ -f1)
+    
+    # Nếu card có IP thì mới làm tiếp
+    if [ -n "$IP" ]; then
+        # Tự tính Gateway
+        GW=$(echo "$IP" | awk -F. '{print $1"."$2"."$3".1"}')
+        
+        # 3 LỆNH CHUẨN XÁC Y HỆT BẢN GÕ TAY CỦA BẠN:
+        ip route flush table $TABLE_ID 2>/dev/null || true
+        ip route add default via $GW dev $IFACE table $TABLE_ID
+        ip rule add from $IP/32 table $TABLE_ID
+        ip rule add to $IP/32 table $TABLE_ID
+        
+        echo " ✅ Đã cấu hình xong $IFACE | IP: $IP | Gateway: $GW"
+        TABLE_ID=$((TABLE_ID + 1))
+    fi
+done
+EOF
+
+# Cấp quyền và chạy thử luôn để bạn xem kết quả trên màn hình
+chmod +x /root/multi_ip_auto.sh
+bash /root/multi_ip_auto.sh
+
+echo "-------------------------------------"
+echo "Đang tạo Service để chạy ngầm lúc Reboot..."
+cat << 'EOF' > /etc/systemd/system/yandex-net.service
+[Unit]
+Description=Yandex Cloud Multi-IP Routing (Simple Mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/multi_ip_auto.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable yandex-net.service
+systemctl restart yandex-net.service
+
+echo "🎉 XONG! Bạn hãy thử mở tab mới và SSH thẳng vào IP thứ 2 xem đã vào được chưa nhé!"
