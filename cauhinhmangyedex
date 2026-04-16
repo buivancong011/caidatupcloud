@@ -1,0 +1,84 @@
+#!/bin/bash
+set -e
+
+echo "[1/3] Đang tạo Script mạng tự động chuẩn xác..."
+
+cat << 'EOF' > /root/multi_ip_auto.sh
+#!/bin/bash
+
+# 1. Tìm card mạng chính để bảo vệ
+MAIN_IFACE=$(ip route show default main | awk '/default/ {print $5}' | head -n 1)
+
+# Chống nhiễu MAC (Bắt buộc khi cắm nhiều card trên Yandex)
+sysctl -w net.ipv4.conf.all.arp_ignore=1 >/dev/null 2>&1
+sysctl -w net.ipv4.conf.all.arp_announce=2 >/dev/null 2>&1
+
+# 2. Bật các card mạng phụ
+SEC_IFACES=$(ls /sys/class/net | grep -E "^eth|^ens|^enp" | grep -v "lo" | grep -v "$MAIN_IFACE")
+
+echo "1. Đang đi xin IP cho các card mạng (Vui lòng chờ)..."
+for iface in $SEC_IFACES; do
+    ip link set $iface up 2>/dev/null || true
+    dhclient $iface 2>/dev/null || true
+done
+
+# CHỜ 10 GIÂY: Bước sống còn để đảm bảo 7 card mạng đều đã được Yandex cấp IP
+sleep 10
+
+# Dọn dẹp Gateway rác do dhclient tự tạo (Chỉ giữ lại mạng tổng của card chính)
+if [ -n "$MAIN_IFACE" ]; then
+    ip route show default | grep -v "$MAIN_IFACE" | while read -r line; do ip route del $line 2>/dev/null || true; done
+fi
+
+echo "2. Đang tự động ráp lệnh Rule giống bản thủ công..."
+TABLE_ID=101
+
+for iface in $SEC_IFACES; do
+    # Quét lấy IP
+    IP=$(ip -o -4 addr show dev $iface | awk '{print $4}' | cut -d/ -f1 | head -n 1)
+    
+    if [ -z "$IP" ]; then 
+        echo " ❌ Bỏ qua $iface do chưa nhận được IP từ hệ thống."
+        continue
+    fi
+    
+    # Tính Gateway tự động
+    GW=$(echo "$IP" | awk -F. '{print $1"."$2"."$3".1"}')
+    
+    ip route flush table $TABLE_ID 2>/dev/null || true
+    
+    # ÉP ĐƯỜNG ĐI (Giống y hệt kịch bản thủ công)
+    ip route add default via $GW dev $iface table $TABLE_ID 2>/dev/null || true
+    ip rule add from $IP/32 table $TABLE_ID 2>/dev/null || true
+    ip rule add to $IP/32 table $TABLE_ID 2>/dev/null || true
+    
+    echo " ✅ Đã tự động lên Rule: $iface | IP: $IP | Gateway: $GW"
+    
+    TABLE_ID=$((TABLE_ID + 1))
+done
+EOF
+
+chmod +x /root/multi_ip_auto.sh
+
+echo "[2/3] Đang tạo Systemd Service để chạy ngầm lúc Reboot..."
+cat << 'EOF' > /etc/systemd/system/multi-ip-auto.service
+[Unit]
+Description=Auto Setup Multi-IP Routing for Yandex Cloud
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/multi_ip_auto.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "[3/3] Đang kích hoạt chạy vĩnh viễn..."
+systemctl daemon-reload
+systemctl enable multi-ip-auto.service
+systemctl restart multi-ip-auto.service
+
+echo "🎉 HOÀN TẤT! Bạn hãy nhìn lên màn hình xem các dòng 'Đã tự động lên Rule' có xuất hiện đủ 7 IP không nhé."
